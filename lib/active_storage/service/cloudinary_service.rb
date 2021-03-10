@@ -54,13 +54,23 @@ module ActiveStorage
     end
 
     def url(key, filename: nil, content_type: '', **options)
+      if content_type.blank?
+        blob = ActiveStorage::Blob.find_by(key: key)
+
+        if blob.present?
+          content_type = blob.content_type
+          filename = blob.filename
+        end
+      end
+
       instrument :url, key: key do |payload|
-        url = Cloudinary::Utils.cloudinary_url(
-          public_id(key),
-          resource_type: resource_type(nil, key),
-          format: ext_for_file(key, filename, content_type),
-          **@options.merge(options.symbolize_keys)
-        )
+        url =
+          Cloudinary::Utils.cloudinary_url(
+            public_id(key),
+            resource_type: resource_type(nil, key),
+            format: ext_for_file(key, filename, content_type),
+            **@options.merge(options.symbolize_keys),
+          )
 
         payload[:url] = url
 
