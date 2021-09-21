@@ -13,6 +13,7 @@ require 'cloudinary/responsive'
 class Cloudinary::Utils
   # @deprecated Use Cloudinary::SHARED_CDN
   SHARED_CDN = Cloudinary::SHARED_CDN
+  MODE_DOWNLOAD = "download"
   DEFAULT_RESPONSIVE_WIDTH_TRANSFORMATION = {:width => :auto, :crop => :limit}
   CONDITIONAL_OPERATORS = {
     "=" => 'eq',
@@ -32,19 +33,34 @@ class Cloudinary::Utils
 
   PREDEFINED_VARS = {
     "aspect_ratio"         => "ar",
+    "aspectRatio"          => "ar",
     "current_page"         => "cp",
+    "currentPage"          => "cp",
     "face_count"           => "fc",
+    "faceCount"            => "fc",
     "height"               => "h",
     "initial_aspect_ratio" => "iar",
+    "initialAspectRatio"   => "iar",
+    "trimmed_aspect_ratio" => "tar",
+    "trimmedAspectRatio"   => "tar",
     "initial_height"       => "ih",
+    "initialHeight"        => "ih",
     "initial_width"        => "iw",
+    "initialWidth"         => "iw",
     "page_count"           => "pc",
+    "pageCount"            => "pc",
     "page_x"               => "px",
+    "pageX"                => "px",
     "page_y"               => "py",
+    "pageY"                => "py",
     "tags"                 => "tags",
     "initial_duration"     => "idu",
+    "initialDuration"      => "idu",
     "duration"             => "du",
-    "width"                => "w"
+    "width"                => "w",
+    "illustration_score"   => "ils",
+    "illustrationScore"    => "ils",
+    "context"              => "ctx"
   }
 
   SIMPLE_TRANSFORMATION_PARAMS = {
@@ -143,6 +159,16 @@ class Cloudinary::Utils
 
   LONG_URL_SIGNATURE_LENGTH = 32
   SHORT_URL_SIGNATURE_LENGTH = 8
+
+  UPLOAD_PREFIX = 'https://api.cloudinary.com'
+
+  ALGO_SHA1 = :sha1
+  ALGO_SHA256 = :sha256
+
+  ALGORITHM_SIGNATURE = {
+    ALGO_SHA1 => Digest::SHA1,
+    ALGO_SHA256 => Digest::SHA256,
+  }
 
   def self.extract_config_params(options)
       options.select{|k,v| URL_KEYS.include?(k)}
@@ -309,16 +335,16 @@ class Cloudinary::Utils
     "if_" + normalize_expression(if_value) unless if_value.to_s.empty?
   end
 
-  EXP_REGEXP = Regexp.new('(?<!\$)('+PREDEFINED_VARS.keys.join("|")+')'+'|('+CONDITIONAL_OPERATORS.keys.reverse.map { |k| Regexp.escape(k) }.join('|')+')(?=[ _])')
+  EXP_REGEXP = Regexp.new('(\$_*[^_ ]+)|(?<![\$:])('+PREDEFINED_VARS.keys.join("|")+')'+'|('+CONDITIONAL_OPERATORS.keys.reverse.map { |k| Regexp.escape(k) }.join('|')+')(?=[ _])')
   EXP_REPLACEMENT = PREDEFINED_VARS.merge(CONDITIONAL_OPERATORS)
 
   def self.normalize_expression(expression)
     if expression.nil?
-      ''
+      nil
     elsif expression.is_a?( String) && expression =~ /^!.+!$/ # quoted string
       expression
     else
-      expression.to_s.gsub(EXP_REGEXP,EXP_REPLACEMENT).gsub(/[ _]+/, "_")
+      expression.to_s.gsub(EXP_REGEXP) { |match| EXP_REPLACEMENT[match] || match }.gsub(/[ _]+/, "_")
     end
   end
 
@@ -405,6 +431,8 @@ class Cloudinary::Utils
   ]
 
   def self.text_style(layer)
+    return layer[:text_style] if layer[:text_style].present?
+
     font_family = layer[:font_family]
     font_size   = layer[:font_size]
     keywords    = []
@@ -433,9 +461,9 @@ class Cloudinary::Utils
     params_to_sign.map{|k,v| [k.to_s, v.is_a?(Array) ? v.join(",") : v]}.reject{|k,v| v.nil? || v == ""}.sort_by(&:first).map{|k,v| "#{k}=#{v}"}.join("&")
   end
 
-  def self.api_sign_request(params_to_sign, api_secret)
+  def self.api_sign_request(params_to_sign, api_secret, signature_algorithm = nil)
     to_sign = api_string_to_sign(params_to_sign)
-    Digest::SHA1.hexdigest("#{to_sign}#{api_secret}")
+    hash("#{to_sign}#{api_secret}", signature_algorithm, :hexdigest)
   end
 
   # Returns a JSON array as String.
@@ -501,6 +529,7 @@ class Cloudinary::Utils
     use_root_path = config_option_consume(options, :use_root_path)
     auth_token = config_option_consume(options, :auth_token)
     long_url_signature = config_option_consume(options, :long_url_signature)
+    signature_algorithm = config_option_consume(options, :signature_algorithm)
     unless auth_token == false
       auth_token = Cloudinary::AuthToken.merge_auth_token(Cloudinary.config.auth_token, auth_token)
     end
@@ -545,7 +574,10 @@ class Cloudinary::Utils
       raise(CloudinaryException, "Must supply api_secret") if (secret.nil? || secret.empty?)
       to_sign = [transformation, sign_version && version, source_to_sign].reject(&:blank?).join("/")
       to_sign = fully_unescape(to_sign)
-      signature = compute_signature(to_sign, secret, long_url_signature)
+      signature_algorithm = long_url_signature ? ALGO_SHA256 : signature_algorithm
+      hash = hash("#{to_sign}#{secret}", signature_algorithm)
+      signature = Base64.urlsafe_encode64(hash)
+      signature = "s--#{signature[0, long_url_signature ? LONG_URL_SIGNATURE_LENGTH : SHORT_URL_SIGNATURE_LENGTH ]}--"
     end
 
     prefix = unsigned_download_url_prefix(source, cloud_name, private_cdn, cdn_subdomain, secure_cdn_subdomain, cname, secure, secure_distribution)
@@ -661,20 +693,70 @@ class Cloudinary::Utils
     prefix
   end
 
+  # Creates a base URL for the cloudinary api
+  #
+  # @param [Object] path  Resource name
+  # @param [Hash] options Additional options
+  #
+  # @return [String]
+  def self.base_api_url(path, options = {})
+    cloudinary = options[:upload_prefix] || Cloudinary.config.upload_prefix || UPLOAD_PREFIX
+    cloud_name = options[:cloud_name] || Cloudinary.config.cloud_name || raise(CloudinaryException, 'Must supply cloud_name')
+
+    [cloudinary, 'v1_1', cloud_name, path].join('/')
+  end
+
   def self.cloudinary_api_url(action = 'upload', options = {})
-    cloudinary = options[:upload_prefix] || Cloudinary.config.upload_prefix || "https://api.cloudinary.com"
-    cloud_name = options[:cloud_name] || Cloudinary.config.cloud_name || raise(CloudinaryException, "Must supply cloud_name")
-    resource_type = options[:resource_type] || "image"
-    return [cloudinary, "v1_1", cloud_name, resource_type, action].join("/")
+    resource_type = options[:resource_type] || 'image'
+
+    base_api_url([resource_type, action], options)
   end
 
   def self.sign_request(params, options={})
     api_key = options[:api_key] || Cloudinary.config.api_key || raise(CloudinaryException, "Must supply api_key")
     api_secret = options[:api_secret] || Cloudinary.config.api_secret || raise(CloudinaryException, "Must supply api_secret")
+    signature_algorithm = options[:signature_algorithm]
     params = params.reject{|k, v| self.safe_blank?(v)}
-    params[:signature] = Cloudinary::Utils.api_sign_request(params, api_secret)
+    params[:signature] = api_sign_request(params, api_secret, signature_algorithm)
     params[:api_key] = api_key
     params
+  end
+
+  # Helper method for generating download URLs
+  #
+  # @param [String] action @see Cloudinary::Utils.cloudinary_api_url
+  # @param [Hash] params Query parameters in generated URL
+  # @param [Hash] options Additional options
+  # @yield [query_parameters] Invokes the block with query parameters to override how to encode them
+  #
+  # @return [String]
+  def self.cloudinary_api_download_url(action, params, options = {})
+    cloudinary_params = sign_request(params.merge(mode: MODE_DOWNLOAD), options)
+
+    "#{Cloudinary::Utils.cloudinary_api_url(action, options)}?#{hash_query_params(cloudinary_params)}"
+  end
+  private_class_method :cloudinary_api_download_url
+
+  # Return a signed URL to the 'generate_sprite' endpoint with 'mode=download'.
+  #
+  # @param [String|Hash] tag Treated as additional options when hash is passed, otherwise as a tag
+  # @param [Hash] options Additional options. Should be omitted when +tag_or_options+ is a Hash
+  #
+  # @return [String] The signed URL to download sprite
+  def self.download_generated_sprite(tag, options = {})
+    params = build_multi_and_sprite_params(tag, options)
+    cloudinary_api_download_url("sprite", params, options)
+  end
+
+  # Return a signed URL to the 'multi' endpoint with 'mode=download'.
+  #
+  # @param [String|Hash] tag Treated as additional options when hash is passed, otherwise as a tag
+  # @param [Hash] options Additional options. Should be omitted when +tag_or_options+ is a Hash
+  #
+  # @return [String] The signed URL to download multi
+  def self.download_multi(tag, options = {})
+    params = build_multi_and_sprite_params(tag, options)
+    cloudinary_api_download_url("multi", params, options)
   end
 
   def self.private_download_url(public_id, format, options = {})
@@ -725,10 +807,9 @@ class Cloudinary::Utils
   # @option options [String] :keep_derived (false) keep the derived images used for generating the archive
   # @return [String] archive url
   def self.download_archive_url(options = {})
-    cloudinary_params = sign_request(Cloudinary::Utils.archive_params(options.merge(:mode => "download")), options)
-    return Cloudinary::Utils.cloudinary_api_url("generate_archive", options) + "?" + hash_query_params(cloudinary_params)
+    params = Cloudinary::Utils.archive_params(options)
+    cloudinary_api_download_url("generate_archive", params, options)
   end
-
 
   # Returns a URL that when invokes creates an zip archive and returns it.
   # @see download_archive_url
@@ -1149,6 +1230,60 @@ class Cloudinary::Utils
     REMOTE_URL_REGEX === url
   end
 
+  # Build params for multi, download_multi, generate_sprite, and download_generated_sprite methods
+  #
+  # @param [String|Hash] tag_or_options Treated as additional options when hash is passed, otherwise as a tag
+  # @param [Hash] options Additional options. Should be omitted when +tag_or_options+ is a Hash
+  #
+  # @return [Hash]
+  #
+  # @private
+  def self.build_multi_and_sprite_params(tag_or_options, options)
+    if tag_or_options.is_a?(Hash)
+      if options.blank?
+        options = tag_or_options
+        tag_or_options = nil
+      else
+        raise "First argument must be a tag when additional options are passed"
+      end
+    end
+    urls = options.delete(:urls)
+
+    if tag_or_options.blank? && urls.blank?
+      raise "Either tag or urls are required"
+    end
+
+    {
+      :tag => tag_or_options,
+      :urls => urls,
+      :transformation => Cloudinary::Utils.generate_transformation_string(options.merge(:fetch_format => options[:format])),
+      :notification_url => options[:notification_url],
+      :format => options[:format],
+      :async => options[:async],
+      :mode => options[:mode],
+      :timestamp => (options[:timestamp] || Time.now.to_i)
+    }
+  end
+
+  # The returned url should allow downloading the backedup asset based on the version and asset id
+  #
+  # asset and version id are returned with resource(<PUBLIC_ID1>, { versions: true })
+  #
+  # @param [String] asset_id   Asset identifier
+  # @param [String] version_id Specific version of asset to download
+  # @param [Hash] options      Additional options
+  #
+  # @return [String] An url for downloading a file
+  def self.download_backedup_asset(asset_id, version_id, options = {})
+    params = Cloudinary::Utils.sign_request({
+      :timestamp => (options[:timestamp] || Time.now.to_i),
+      :asset_id => asset_id,
+      :version_id => version_id
+    }, options)
+
+    "#{Cloudinary::Utils.base_api_url("download_backup", options)}?#{Cloudinary::Utils.hash_query_params((params))}"
+  end
+
   # Format date in a format accepted by the usage API (e.g., 31-12-2020) if
   # passed value is of type Date, otherwise return the string representation of
   # the input.
@@ -1163,23 +1298,61 @@ class Cloudinary::Utils
     end
   end
 
-  # Computes a short or long signature based on a message and secret
-  # @param [String]  message The string to sign
-  # @param [String]  secret A secret that will be added to the message when signing
-  # @param [Boolean] long_signature Whether to create a short or long signature
-  # @return [String] Properly formatted signature
-  def self.compute_signature(message, secret, long_url_signature)
-    combined_message_secret = message + secret
+  # Verifies the authenticity of an API response signature.
+  #
+  # @param [String] public_id he public id of the asset as returned in the API response
+  # @param [Fixnum] version The version of the asset as returned in the API response
+  # @param [String] signature Actual signature. Can be retrieved from the X-Cld-Signature header
+  # @param [Symbol|nil] signature_algorithm Algorithm to use for computing hash
+  # @param [Hash] options
+  # @option options [String] :api_secret API secret, if not passed taken from global config
+  #
+  # @return [Boolean]
+  def self.verify_api_response_signature(public_id, version, signature, signature_algorithm = nil, options = {})
+    api_secret = options[:api_secret] || Cloudinary.config.api_secret || raise("Must supply api_secret")
 
-    algo, signature_length =
-      if long_url_signature
-        [Digest::SHA256, LONG_URL_SIGNATURE_LENGTH]
-      else
-        [Digest::SHA1, SHORT_URL_SIGNATURE_LENGTH]
-      end
+    parameters_to_sign = {
+      :public_id => public_id,
+      :version => version
+    }
 
-    "s--#{Base64.urlsafe_encode64(algo.digest(combined_message_secret))[0, signature_length]}--"
+    signature == api_sign_request(parameters_to_sign, api_secret, signature_algorithm)
   end
 
-  private_class_method :compute_signature
+  # Verifies the authenticity of a notification signature.
+  #
+  # @param [String] body JSON of the request's body
+  # @param [Fixnum] timestamp Unix timestamp. Can be retrieved from the X-Cld-Timestamp header
+  # @param [String] signature Actual signature. Can be retrieved from the X-Cld-Signature header
+  # @param [Fixnum] valid_for The desired time in seconds for considering the request valid
+  # @param [Symbol|nil] signature_algorithm Algorithm to use for computing hash
+  # @param [Hash] options
+  # @option options [String] :api_secret API secret, if not passed taken from global config
+  #
+  # @return [Boolean]
+  def self.verify_notification_signature(body, timestamp, signature, valid_for = 7200, signature_algorithm = nil, options = {})
+    api_secret = options[:api_secret] || Cloudinary.config.api_secret || raise("Must supply api_secret")
+    raise("Body should be of String type") unless body.is_a?(String)
+    # verify that signature is valid for the given timestamp
+    return false if timestamp < (Time.now - valid_for).to_i
+
+    payload_hash = hash("#{body}#{timestamp}#{api_secret}", signature_algorithm, :hexdigest)
+
+    signature == payload_hash
+  end
+
+  # Computes hash from input string using specified algorithm.
+  #
+  # @param [String] input                   String which to compute hash from
+  # @param [Symbol|nil] signature_algorithm Algorithm to use for computing hash
+  # @param [Symbol] hash_method             Hash method applied to a signature algorithm (:digest or :hexdigest)
+  #
+  # @return [String] Computed hash value
+  def self.hash(input, signature_algorithm = nil, hash_method = :digest)
+    signature_algorithm ||= Cloudinary.config.signature_algorithm || ALGO_SHA1
+    algorithm = ALGORITHM_SIGNATURE[signature_algorithm] || raise("Unsupported algorithm '#{signature_algorithm}'")
+    algorithm.public_send(hash_method, input)
+  end
+
+  private_class_method :hash
 end

@@ -2,7 +2,7 @@ require 'spec_helper'
 require 'cloudinary'
 
 describe Cloudinary::Utils do
-
+  SIGNATURE_VERIFICATION_API_SECRET = "X7qLTrsES31MzxxkxPPA-pAGGfU"
 
   before :each do
     Cloudinary.reset_config
@@ -152,6 +152,18 @@ describe Cloudinary::Utils do
                                                 :long_url_signature => true
 
     expect(expected).to eq("http://res.cloudinary.com/test123/image/upload/s--2hbrSMPOjj5BJ4xV7SgFbRDevFaQNUFf--/sample.jpg")
+  end
+
+  it "should sign url with SHA256 algorithm set in configuration" do
+    Cloudinary.config.signature_algorithm = Cloudinary::Utils::ALGO_SHA256
+
+    expected = Cloudinary::Utils.cloudinary_url "sample.jpg",
+                                                :cloud_name => "test123",
+                                                :api_key => "a",
+                                                :api_secret => "b",
+                                                :sign_url => true
+
+    expect(expected).to eq("http://res.cloudinary.com/test123/image/upload/s--2hbrSMPO--/sample.jpg")
   end
 
   it "should not sign the url_suffix" do
@@ -677,6 +689,28 @@ describe Cloudinary::Utils do
     end
   end
 
+  it "should support text layer style identifier variables" do
+    options = [
+      "sample",
+      {
+        transformation: [
+          {
+            variables: [
+              ["$style", "!Arial_12!"],
+            ]
+          },
+          {
+            overlay: {
+              text: "hello-world",
+              text_style: "$style"
+            }
+          }
+        ]
+      }
+    ]
+
+    expect(options).to produce_url("#{upload_path}/$style_!Arial_12!/l_text:$style:hello-world/sample")
+  end
 
   it "should use ssl_detected if secure is not given as parameter and not set to true in configuration" do
     expect(["test", { :ssl_detected => true }])
@@ -925,6 +959,29 @@ describe Cloudinary::Utils do
     expect(Cloudinary::Utils.encode_double_array([[1, 2, 3, 4], [5, 6, 7, 8]])).to eq("1,2,3,4|5,6,7,8")
   end
 
+  it "should sign an API request using SHA1 by default" do
+    signature = Cloudinary::Utils.api_sign_request({ :cloud_name => "dn6ot3ged",  :timestamp => 1568810420,  :username => "user@cloudinary.com" }, "hdcixPpR2iKERPwqvH6sHdK9cyac")
+    expect(signature).to eq("14c00ba6d0dfdedbc86b316847d95b9e6cd46d94")
+  end
+
+  it "should sign an API request using SHA256" do
+    Cloudinary.config.signature_algorithm = Cloudinary::Utils::ALGO_SHA256
+    signature = Cloudinary::Utils.api_sign_request({ :cloud_name => "dn6ot3ged",  :timestamp => 1568810420,  :username => "user@cloudinary.com" }, "hdcixPpR2iKERPwqvH6sHdK9cyac")
+    expect(signature).to eq("45ddaa4fa01f0c2826f32f669d2e4514faf275fe6df053f1a150e7beae58a3bd")
+  end
+
+  it "should sign an API request using SHA256 via parameter" do
+    signature = Cloudinary::Utils.api_sign_request({ :cloud_name => "dn6ot3ged",  :timestamp => 1568810420,  :username => "user@cloudinary.com" }, "hdcixPpR2iKERPwqvH6sHdK9cyac", :sha256)
+    expect(signature).to eq("45ddaa4fa01f0c2826f32f669d2e4514faf275fe6df053f1a150e7beae58a3bd")
+  end
+
+  it "should raise when unsupported algorithm is passed" do
+    signature_algorithm = "unsupported_algorithm"
+
+    expect{Cloudinary::Utils.api_sign_request({ :cloud_name => "dn6ot3ged",  :timestamp => 1568810420,  :username => "user@cloudinary.com" }, "hdcixPpR2iKERPwqvH6sHdK9cyac", signature_algorithm)}
+      .to raise_error("Unsupported algorithm 'unsupported_algorithm'")
+  end
+
   describe ":if" do
     describe 'with literal condition string' do
       it "should include the if parameter as the first component in the transformation string" do
@@ -1042,6 +1099,30 @@ describe Cloudinary::Utils do
       t = Cloudinary::Utils.generate_transformation_string options, true
       expect(t).to eq("$width_10/w_$width_add_10_add_w")
     end
+
+    it "should not affect user variable names containing predefined names" do
+      options = {
+        :transformation => [
+          { :variables => [ ["$aheight", 300], ["$mywidth", "100"] ] },
+          { :width => "3 + $mywidth * 3 + 4 / 2 * initialWidth * $mywidth", :height => "3 * initialHeight + $aheight" },
+        ]
+      }
+
+      t = Cloudinary::Utils.generate_transformation_string options, true
+      expect(t).to eq("$aheight_300,$mywidth_100/h_3_mul_ih_add_$aheight,w_3_add_$mywidth_mul_3_add_4_div_2_mul_iw_mul_$mywidth")
+    end
+
+    it "should use context value as user variables" do
+      options = {
+        :variables => [["$xpos", "ctx:!x_pos!_to_f"], ["$ypos", "ctx:!y_pos!_to_f"]],
+        :crop => "crop",
+        :x => "$xpos * w",
+        :y => "$ypos * h"
+      }
+
+      t = Cloudinary::Utils.generate_transformation_string options
+      expect(t).to eq("$xpos_ctx:!x_pos!_to_f,$ypos_ctx:!y_pos!_to_f,c_crop,x_$xpos_mul_w,y_$ypos_mul_h")
+    end
   end
 
     describe "context" do
@@ -1102,5 +1183,189 @@ describe Cloudinary::Utils do
     end
 
   end
+  end
+
+  describe ".verify_api_response_signature" do
+    let(:public_id) { 'tests/logo.png' }
+    let(:test_version) { 1 }
+    let(:api_response_signature_sha1) { '08d3107a5b2ad82e7d82c0b972218fbf20b5b1e0' }
+    let(:api_response_signature_sha256) { 'cc69ae4ed73303fbf4a55f2ae5fc7e34ad3a5c387724bfcde447a2957cacdfea' }
+
+    before do
+      Cloudinary.config.update(:api_secret => SIGNATURE_VERIFICATION_API_SECRET)
+    end
+
+    it "should return true when signature is valid" do
+      expect(
+        Cloudinary::Utils.verify_api_response_signature(public_id, test_version, api_response_signature_sha1)
+      ).to be true
+    end
+
+    it "should return false when signature is invalid" do
+      expect(
+        Cloudinary::Utils.verify_api_response_signature(public_id, test_version + 1, api_response_signature_sha1)
+      ).to be false
+    end
+
+    it "should support sha256 signature algorithm" do
+      expect(
+        Cloudinary::Utils.verify_api_response_signature(
+          public_id,
+          test_version,
+          api_response_signature_sha256,
+          Cloudinary::Utils::ALGO_SHA256)
+      ).to be true
+    end
+  end
+
+  describe ".verify_notification_signature" do
+    let(:signature_sha1) { 'dfe82de1d9083fe0b7ea68070649f9a15b8874da' }
+    let(:signature_sha256) { 'd5497e1a206ad0ba29ad09a7c0c5f22e939682d15009c15ab3199f62fefbd14b' }
+    let(:valid_for) { 60 }
+    let(:valid_response_timestamp) { (Time.now - valid_for).to_i }
+    let(:body) do
+      '{"notification_type":"eager","eager":[{"transformation":"sp_full_hd/mp4","bytes":1055,' \
+               '"url":"http://res.cloudinary.com/demo/video/upload/sp_full_hd/v1533125278/dog.mp4",' \
+               '"secure_url":"https://res.cloudinary.com/demo/video/upload/sp_full_hd/v1533125278/dog.mp4"}],' \
+               '"public_id":"dog","batch_id":"9b11fa058c61fa577f4ec516bf6ee756ac2aefef095af99aef1302142cc1694a"}'
+    end
+    let(:response_json) { expected_parameters.to_json }
+    let(:unexpected_response_json) { unexpected_parameters.to_json }
+    let(:mocked_now) { 1549533574 }
+
+    before do
+      allow(Time).to receive(:now).and_return(mocked_now)
+      Cloudinary.config.update(:api_secret => SIGNATURE_VERIFICATION_API_SECRET)
+    end
+
+    it "should return true for matching and not expired signature" do
+      expect(
+        Cloudinary::Utils.verify_notification_signature(
+          body,
+          valid_response_timestamp,
+          signature_sha1,
+          valid_for
+        )
+      ).to be true
+    end
+
+    it "should return false for matching but expired signature" do
+      expect(
+        Cloudinary::Utils.verify_notification_signature(
+          body,
+          valid_response_timestamp,
+          signature_sha1,
+          valid_for - 1
+        )
+      ).to be false
+    end
+
+    it "should return false for non matching and not expired signature" do
+      expect(
+        Cloudinary::Utils.verify_notification_signature(
+          body,
+          valid_response_timestamp,
+          "#{signature_sha1}chars"
+        )
+      ).to be false
+    end
+
+    it "should return false for non matching and expired signature" do
+      expect(
+        Cloudinary::Utils.verify_notification_signature(
+          body,
+          valid_response_timestamp,
+          "#{signature_sha1}chars",
+          valid_for - 1
+        )
+      ).to be false
+    end
+
+    it "should raise when body is not a string" do
+      expect {
+        Cloudinary::Utils.verify_notification_signature(
+          1,
+          valid_response_timestamp,
+          signature_sha1,
+          valid_for
+        )
+      }.to raise_error("Body should be of String type")
+    end
+
+    it "should raise when api secret is not provided" do
+      Cloudinary.config.api_secret = nil
+
+      expect {
+        Cloudinary::Utils.verify_notification_signature(
+          body,
+          valid_response_timestamp,
+          signature_sha1,
+          valid_for
+        )
+      }.to raise_error("Must supply api_secret")
+    end
+
+    it "should support sha256 signature algorithm" do
+      expect(
+        Cloudinary::Utils.verify_notification_signature(
+          "{}",
+          0,
+          signature_sha256,
+          mocked_now,
+          Cloudinary::Utils::ALGO_SHA256,
+          :api_secret => "someApiSecret"
+        )
+      ).to be true
+    end
+  end
+
+  it "should download a sprite" do
+    sprite_test_tag = "sprite_tag#{SUFFIX}"
+    url1 = "https://res.cloudinary.com/demo/image/upload/sample"
+    url2 = "https://res.cloudinary.com/demo/image/upload/car"
+
+    url_from_tag = Cloudinary::Utils.download_generated_sprite(sprite_test_tag)
+    url_from_urls = URI.decode(Cloudinary::Utils.download_generated_sprite(:urls => [url1, url2]))
+
+    expect(url_from_tag).to start_with("https://api.cloudinary.com/v1_1/#{Cloudinary.config.cloud_name}/image/sprite")
+    expect(url_from_urls).to start_with("https://api.cloudinary.com/v1_1/#{Cloudinary.config.cloud_name}/image/sprite")
+    expect(url_from_urls).to include("urls[]=#{url1}")
+    expect(url_from_urls).to include("urls[]=#{url2}")
+
+    parameters = CGI::parse(url_from_tag)
+    expect(parameters["tag"]).to eq([sprite_test_tag])
+    expect(parameters["mode"]).to eq([Cloudinary::Utils::MODE_DOWNLOAD])
+    expect(parameters["timestamp"]).not_to be_nil
+    expect(parameters["signature"]).not_to be_nil
+
+    parameters = CGI::parse(url_from_urls)
+    expect(parameters["mode"]).to eq([Cloudinary::Utils::MODE_DOWNLOAD])
+    expect(parameters["timestamp"]).not_to be_nil
+    expect(parameters["signature"]).not_to be_nil
+  end
+
+  it "should download multi" do
+    multi_test_tag = "multi_test_tag_#{UNIQUE_TEST_ID}"
+    url1 = "https://res.cloudinary.com/demo/image/upload/sample"
+    url2 = "https://res.cloudinary.com/demo/image/upload/car"
+
+    url_from_tag = Cloudinary::Utils.download_multi(multi_test_tag)
+    url_from_urls = URI.decode(Cloudinary::Utils.download_multi(:urls => [url1, url2]))
+
+    expect(url_from_tag).to start_with("https://api.cloudinary.com/v1_1/#{Cloudinary.config.cloud_name}/image/multi")
+    expect(url_from_urls).to start_with("https://api.cloudinary.com/v1_1/#{Cloudinary.config.cloud_name}/image/multi")
+    expect(url_from_urls).to include("urls[]=#{url1}")
+    expect(url_from_urls).to include("urls[]=#{url2}")
+
+    parameters = CGI::parse(url_from_tag)
+    expect(parameters["tag"]).to eq([multi_test_tag])
+    expect(parameters["mode"]).to eq([Cloudinary::Utils::MODE_DOWNLOAD])
+    expect(parameters["timestamp"]).not_to be_nil
+    expect(parameters["signature"]).not_to be_nil
+
+    parameters = CGI::parse(url_from_urls)
+    expect(parameters["mode"]).to eq([Cloudinary::Utils::MODE_DOWNLOAD])
+    expect(parameters["timestamp"]).not_to be_nil
+    expect(parameters["signature"]).not_to be_nil
   end
 end

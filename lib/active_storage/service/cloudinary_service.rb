@@ -105,7 +105,12 @@ module ActiveStorage
 
     def delete(key)
       instrument :delete, key: key do
-        Cloudinary::Uploader.destroy public_id(key), resource_type: resource_type(nil, key)
+        options = {
+          resource_type: resource_type(nil, key),
+          type: @options[:type]
+        }.compact
+
+        Cloudinary::Uploader.destroy public_id(key), **options
       end
     end
 
@@ -117,7 +122,12 @@ module ActiveStorage
     def exist?(key)
       instrument :exist, key: key do |payload|
         begin
-          Cloudinary::Api.resource public_id(key), resource_type: resource_type(nil, key)
+          options = {
+            resource_type: resource_type(nil, key),
+            type: @options[:type]
+          }.compact
+
+          Cloudinary::Api.resource public_id(key), **options
           true
         rescue Cloudinary::Api::NotFound => e
           false
